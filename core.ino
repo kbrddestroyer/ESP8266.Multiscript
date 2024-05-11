@@ -1,31 +1,64 @@
 #include <LiquidCrystal_I2C.h>
 
+// #define DEBUG_MODE
+
+/*
+
+  This project is based on NodeMCU board
+
+  Mappings:
+  I2C 1609 LCD Display
+  
+  I2C SDA   -> D2
+  I2C SDL   -> D1
+
+  Joystick module
+
+  JOY_SW    -> D7
+  JOY_AXISY -> A0
+
+  5V USB-C Powered
+*/
+
+#pragma region MACRO
+/*
+*   This region contains required macros 
+* e.g. pins, debug mode flag, etc.
+*
+* Digital pins are board-dependent
+*/
+
 #ifdef DEBUG_MODE
-const bool DEBUG = true;
+  const bool DEBUG = true;
 #else
-const bool DEBUG = false;
+  const bool DEBUG = false;
 #endif
 
-#define JOYSTICK_BTN D7
-#define JOYSTICK_AXIS_Y A0
+#ifdef ARDUINO_ESP8266_NODEMCU_ESP12 | ARDIONO_ESP8266_NODEMCU_ESP12E
+  #define JOYSTICK_BTN    D7  
+  #define PRESSED         0
+  #define RELEASED        1
+#else
+  #define JOYSTICK_BTN    7
+  #define PRESSED         1
+  #define RELEASED        0
+#endif
 
-#define SCREEN_WIDTH 16
-#define SCREEN_HEIGHT 2
+#define GUI_MARKER_OFF    "  "
+#define GUI_MARKER_ON     "- "
 
-#define PRESSED   0
-#define RELEASED  1
+#define JOYSTICK_AXIS_Y   A0
 
-#define NEXT_ITEM   1
-#define NEUTRAL     0
-#define PREV_ITEM   -1
+#define SCREEN_WIDTH      16
+#define SCREEN_HEIGHT     2
+#define NEXT_ITEM         1
+#define NEUTRAL           0
+#define PREV_ITEM         -1
+#pragma endregion MACRO
 
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
-//
-// <--  List controller  ---> //
-// 
-// Created to ease array implementation
-
+#pragma region INTERNAL_COMPONENTS
 namespace Containers 
 {
   template<class T>
@@ -33,9 +66,9 @@ namespace Containers
   {
   private:
     T*            items;
-    unsigned int  size = 0;
+    uint8_t size = 0;
   public:
-    List(unsigned int size = 0) {
+    List(uint8_t size = 0) {
       items = new T[size];
       this->size = size;
     }
@@ -43,22 +76,22 @@ namespace Containers
     void insert(T item)
     {
       T* buffered = new T[++size];
-      for (unsigned int i = 0; i < size - 1; i++)
+      for (uint8_t i = 0; i < size - 1; i++)
         buffered[i] = items[i];
       buffered[size - 1] = item;
       delete[] items;
       items = buffered;
     }
 
-    T remove(unsigned int index) {
+    T remove(uint8_t index) {
       if (index >= size)
         return nullptr;
       T* buffered = new T[--size];
       T removed = items[index];
       
-      for (unsigned int i = 0; i < index; i++)
+      for (uint8_t i = 0; i < index; i++)
         buffered[i] = items[i];
-      for (unsigned int i = index + 1; i <= size; i++)
+      for (uint8_t i = index + 1; i <= size; i++)
         buffered[i - 1] = items[i];
       delete[] items;
       items = buffered;
@@ -70,11 +103,12 @@ namespace Containers
       return remove(size - 1);
     }
 
-    unsigned int getSize() { return size; }
+    uint8_t getSize() { return size; }
 
-    T& operator[] (unsigned int index) { return items[index]; }
+    T& operator[] (uint8_t index) { return items[index]; }
   };
 }
+#pragma endregion COMPONENTS
 
 //
 // <---   INPUT CONTROLLER  ---> //
@@ -83,54 +117,65 @@ namespace Containers
 class JoystickController
 {
 private:
-  short previous = NEUTRAL;
-  short buttonPrev = RELEASED;
-  void (*callback) (short);
+  int8_t previousJoystickState = NEUTRAL;
+  bool   previousButtonState   = RELEASED;
+  
+  // Function calls
+  void (*joystick) (int8_t);
   void (*button) ();
 
-  short tick() 
+  int8_t getJoystickMappedState() 
   {
     return map(analogRead(JOYSTICK_AXIS_Y), 0, 1024, -1, 1);
   }
 
-  void Invoke(short state)
+  void invokeJoystick(int8_t state)
   {
-    if (!callback)
+    if (!joystick)
     {
-      Serial.println("Warning! Callback not set!");
+      if (DEBUG)
+        Serial.println("Warning! Joystick callback not set!");
       return;
     }
 
-    if (state != NEUTRAL)
-      callback(state);
+    if (state != NEUTRAL) // neutral state can be ignored
+      joystick(state);
   }
 
-  void Button() {
-    if (button) button();
+  void invokeButton() {
+    if (!button) 
+    {
+      if (DEBUG)
+        Serial.println("Warning! Button callback not set!");
+      return;
+    }
+    button();
   }
 public:
-  JoystickController(void (*callback) (short) = nullptr, void (*button) () = nullptr) 
+  JoystickController(void (*joystick) (int8_t) = nullptr, void (*button) () = nullptr) 
   {
     pinMode(JOYSTICK_BTN, INPUT_PULLUP);
     pinMode(JOYSTICK_AXIS_Y, INPUT);
-    this-> callback = callback;
+
+    this-> joystick = joystick;
     this-> button = button;
   }
 
   void Update() {
-    short current = tick();
+    int8_t currentJoystickState = getJoystickMappedState();
 
-    if (current != previous)
+    if (currentJoystickState != previousJoystickState)
     {
-      Invoke(current);
-      previous = current;
+      previousJoystickState = currentJoystickState;
+      invokeJoystick(currentJoystickState);
     }
-    short btnState = digitalRead(JOYSTICK_BTN);
+    bool currentButtonState = digitalRead(JOYSTICK_BTN);
 
-    if (btnState != buttonPrev)
+    if (currentButtonState != previousButtonState)
     {
-      buttonPrev = btnState;
-      if (btnState == PRESSED) Button();
+      previousButtonState = currentButtonState;
+      if (currentButtonState == PRESSED) 
+        invokeButton();
     }
   }
 };
@@ -140,6 +185,7 @@ class MenuAction
 private:
   String  label;
   bool    chosen;
+protected:
   void (*action)();
 public:
   MenuAction(String label = "none", void(*action)() = nullptr, bool chosen = false)
@@ -153,7 +199,7 @@ public:
 
   String toString() 
   {
-    return (String) "[" + (String) (chosen ? "*] " : " ] ") + label;
+    return (String) (String) (chosen ? GUI_MARKER_ON : GUI_MARKER_OFF) + label;
   }
 
   void Invoke()
@@ -166,12 +212,13 @@ class Menu
 {
 private:
   Containers::List<MenuAction>  menu;
-  unsigned int currentActive = 0;
+  uint8_t currentActive = 0;
+  uint8_t currentDisplayStart = 0;
 
   struct Vector2i 
   {
-    unsigned int x;
-    unsigned int y;
+    uint8_t x;
+    uint8_t y;
   };
 
   void print(Vector2i position, String str) 
@@ -182,27 +229,27 @@ private:
 public:
   Menu()
   {
-    menu.insert(MenuAction("List 1", []() { lcd.backlight(); } ));
-    menu.insert(MenuAction("List 2", []() { lcd.noBacklight(); } ));
+    menu.insert(MenuAction("Backlight ON", []() { lcd.backlight(); } ));
+    menu.insert(MenuAction("Backlight OFF", []() { lcd.noBacklight(); } ));
     menu[currentActive].setActive(true);
   }
 
   void Display()
   {
     Vector2i start = { 0, 0 };
-    for (unsigned int i = 0; i < menu.getSize(); i++) {
+    for (uint8_t i = 0; i < menu.getSize(); i++) {
       print(start, menu[i].toString());
       start.y++;
     }
   }
 
-  void setActive(int index)
+  void setActive(int8_t index)
   {
     if (index >= menu.getSize() || index < 0)
     {
-      index = abs(index % (int) menu.getSize());
+      index = abs(index % (int8_t) menu.getSize());
     }
-    for (unsigned int i = 0; i < menu.getSize(); i++)
+    for (uint8_t i = 0; i < menu.getSize(); i++)
       menu[i].setActive(false);
     menu[index].setActive(true);
     currentActive = index;
@@ -210,13 +257,13 @@ public:
     Display();
   }
 
-  unsigned int getActive() { return currentActive; }
+  uint8_t getActive() { return currentActive; }
 
   MenuAction& getActiveAction() { return menu[currentActive]; }
 };
 
 Menu menu;
-JoystickController controller([](short state) { menu.setActive(menu.getActive() + state); }, []() { menu.getActiveAction().Invoke(); });
+JoystickController controller([](int8_t state) { menu.setActive(menu.getActive() + state); }, []() { menu.getActiveAction().Invoke(); });
 
 void setup()
 {
